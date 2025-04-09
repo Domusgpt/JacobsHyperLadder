@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hyperlattice Distortion Demo (Working)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #010204; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        #info { position: absolute; bottom: 10px; left: 10px; background: rgba(0,0,0,0.8); padding: 5px 10px; border-radius: 3px; font-size: 10px; font-family: monospace; color: #9af; z-index: 10; }
+    </style>
+</head>
+<body>
+    <canvas id="glCanvas"></canvas>
+    <div id="info">Initializing...</div>
+
+    {/* Vertex Shader - Defines v_uv varying */}
+    <script id="vertex-shader" type="x-shader/x-vertex">
+        attribute vec2 a_position; // Using simple -1 to 1 quad vertices
+        varying vec2 v_uv;       // <<< DECLARED HERE
+        void main() {
+            v_uv = a_position * 0.5 + 0.5; // Calculate and ASSIGN UVs HERE
+            gl_Position = vec4(a_position, 0.0, 1.0);
+        }
+    </script>
+
+    {/* Fragment Shader - Reads v_uv varying */}
+    <script id="fragment-shader" type="x-shader/x-fragment">
+        precision highp float;
+        uniform vec2 R; // Resolution
+        uniform float T; // Time
+
+        // Grid Layer Parameters
+        uniform float D[4]; uniform float Thick[4]; uniform float Rot[4]; uniform float Speed[4];
+        // Hypercube
+        uniform float HyperDistort; uniform vec2 ProjVerts[16];
+        const int NUM_PROJ_VERTS = 16; // Keep consistent with array size
+        // Particles
+        const int MAX_PARTICLES = 32; // Keep consistent with array size
+        uniform vec3 Particles[MAX_PARTICLES];
+
+        varying vec2 v_uv; // <<< READ HERE (Matching name and type from VS)
+
+        // Utils
+        mat2 rot2d(float a){ float c=cos(a),s=sin(a); return mat2(c,-s,s,c); }
+        float rnd(vec2 c){ return fract(sin(dot(c,vec2(12.345,45.678)))*54321.); }
+        float noise(vec2 p){ vec2 i=floor(p); vec2 f=fract(p); vec2 u=f*f*(3.-2.*f); return mix(mix(rnd(i),rnd(i+vec2(1,0)),u.x),mix(rnd(i+vec2(0,1)),rnd(i+vec2(1,1)),u.x),u.y); }
+
+        // Grid Gap (Uses v_uv indirectly via uv_in argument)
+        float gridGap(vec2 uv_in, float density, float thickness, float rotation, float speed, float time_offset) {
+             float edge = 0.5 - (thickness * 0.5);
+             if (edge > 0.499) return 1.0;
+             vec2 center = vec2(0.5);
+             vec2 rotatedUv = rot2d(rotation + T * speed * 0.1) * (uv_in - center) + center;
+             vec2 gridUv = rotatedUv * density + vec2(T * speed * 0.2 + time_offset, -T * speed * 0.15 + time_offset*0.6);
+             vec2 gridDist = abs(fract(gridUv) - 0.5);
+             float isGridLine = max(step(edge, gridDist.x), step(edge, gridDist.y));
+             return 1.0 - isGridLine;
+        }
+
+        // Background (Uses v_uv indirectly via uv_in argument)
+        vec3 getBackground(vec2 uv_in) {
+             vec2 p = (uv_in - 0.5) * 4.0; p *= rot2d(T * 0.05);
+             float n = 0.0; float scale = 2.0; float amp = 0.5;
+             for(int i=0; i<4; i++) { n += noise(p * scale + T * 0.1) * amp; scale *= 2.0; amp *= 0.5; }
+             vec3 colA = vec3(0.1, 0.0, 0.2); vec3 colB = vec3(0.5, 0.1, 0.8); vec3 colC = vec3(0.1, 0.7, 0.9);
+             vec3 col = mix(colA, colB, smoothstep(0.3, 0.7, n)); col = mix(col, colC, smoothstep(0.5, 0.8, n) * 0.6);
+             return col;
+        }
+
+        void main() {
+            // --- 1. Hypercube Distortion ---
+            float hyperInfluence = 0.0;
+            vec2 totalHyperOffset = vec2(0.0);
+            for (int i = 0; i < NUM_PROJ_VERTS; i++) {
+                // Use v_uv here
+                float distSq = dot(v_uv - ProjVerts[i], v_uv - ProjVerts[i]);
+                float influence = exp(-distSq * 80.0) * HyperDistort;
+                hyperInfluence += influence;
+                // Use v_uv here
+                totalHyperOffset += normalize(v_uv - ProjVerts[i] + 1e-6) * influence * 0.05; // Add epsilon to avoid normalize(0)
+            }
+            hyperInfluence = clamp(hyperInfluence, 0.0, 1.0);
+            // Use v_uv here
+            vec2 distortedBgUv = v_uv + totalHyperOffset;
+
+            // --- 2. Background Color ---
+            vec3 bgColor = getBackground(distortedBgUv);
+
+            // --- 3. Glass Grid ---
+            float finalGap = 0.0;
+            // Use v_uv here
+            finalGap = max(finalGap, gridGap(v_uv, D[0], Thick[0], Rot[0], Speed[0], 0.0));
+            finalGap = max(finalGap, gridGap(v_uv, D[1], Thick[1], Rot[1], Speed[1], 0.1));
+            finalGap = max(finalGap, gridGap(v_uv, D[2], Thick[2], Rot[2], Speed[2], 0.2));
+            finalGap = max(finalGap, gridGap(v_uv, D[3], Thick[3], Rot[3], Speed[3], 0.3));
+            float glassAmount = 1.0 - finalGap;
+
+            // --- 4. Final Color ---
+            vec3 finalColor;
+            if (glassAmount < 0.01) {
+                finalColor = bgColor;
+            } else {
+                // Use distortedBgUv for blur sample, v_uv for tint/glow calculations
+                vec2 blurOffset = vec2(rnd(v_uv + T), rnd(v_uv - T)) * 0.003;
+                vec3 blurredBg = getBackground(distortedBgUv + blurOffset); // Sample blurred bg
+                vec4 tint = vec4(0.8, 0.9, 1.0, 0.15);
+                tint.a *= clamp(glassAmount * 1.5, 0.1, 0.7);
+                finalColor = mix(blurredBg, tint.rgb, tint.a);
+                finalColor = mix(finalColor, vec3(1.0, 0.8, 0.5), hyperInfluence * glassAmount * 0.5);
+            }
+
+            // --- 5. Particles ---
+            for (int i = 0; i < MAX_PARTICLES; i++) {
+                 vec3 pData = Particles[i]; if (pData.z <= 0.0) continue;
+                 vec2 pPos = pData.xy; float pSize = pData.z * 0.01; float pBright = clamp(pData.z * 1.5, 0.5, 1.5);
+                 // Use v_uv here
+                 float distSq = dot(v_uv - pPos, v_uv - pPos);
+                 float particleGlow = exp(-distSq / (pSize * pSize + 1e-5)) * pBright; // Add epsilon to size
+                 finalColor += vec3(0.8, 1.0, 0.9) * particleGlow * 0.5;
+            }
+
+            // --- Output ---
+            gl_FragColor = vec4(pow(clamp(finalColor, 0.0, 1.5), vec3(0.4545)), 1.0);
+        }
+    </script>
+
+    <script>
+        // --- JavaScript (Includes Math.PI fix and consistent attribute name) ---
+        document.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.getElementById('glCanvas');
+            const infoDiv = document.getElementById('info');
+            if (!canvas || !infoDiv) { console.error("Missing canvas/info"); return; }
+
+            let gl; let program; let locations = {};
+            let quadBuffer;
+            let startTime = performance.now();
+            let animationFrameId = null; let needsResize = true;
+
+            const MAX_PARTICLES = 32; // Must match shader
+            let particles = []; let particleData = new Float32Array(MAX_PARTICLES * 3);
+            const hypercubeVerts = [ [-1,-1,-1,-1], [ 1,-1,-1,-1], [-1, 1,-1,-1], [ 1, 1,-1,-1], [-1,-1, 1,-1], [ 1,-1, 1,-1], [-1, 1, 1,-1], [ 1, 1, 1,-1], [-1,-1,-1, 1], [ 1,-1,-1, 1], [-1, 1,-1, 1], [ 1, 1,-1, 1], [-1,-1, 1, 1], [ 1,-1, 1, 1], [-1, 1, 1, 1], [ 1, 1, 1, 1] ];
+            let projectedVerts = new Float32Array(16 * 2);
+
+            function createShader(g,t,s){ const sh=g.createShader(t);g.shaderSource(sh,s);g.compileShader(sh);if(!g.getShaderParameter(sh,g.COMPILE_STATUS)){console.error(`Shader ${t===g.VERTEX_SHADER?'VS':'FS'} Err:`,g.getShaderInfoLog(sh));g.deleteShader(sh);return null;}return sh;}
+            function createProgram(g,vs,fs){ const p=g.createProgram();g.attachShader(p,vs);g.attachShader(p,fs);g.linkProgram(p);if(!g.getProgramParameter(p,g.LINK_STATUS)){console.error('Link Err:',g.getProgramInfoLog(p));g.deleteProgram(p);return null;}return p;}
+
+            function setupResources() {
+                const vsSrc = document.getElementById('vertex-shader').text;
+                const fsSrc = document.getElementById('fragment-shader').text;
+                const vs = createShader(gl, gl.VERTEX_SHADER, vsSrc);
+                const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSrc);
+                if (!vs || !fs) throw new Error("Shader compile fail");
+                program = createProgram(gl, vs, fs);
+                if (!program) throw new Error("Program link fail");
+
+                locations = { // Get all locations needed
+                    a_position: gl.getAttribLocation(program, 'a_position'), // <<< Match VS attribute
+                    R: gl.getUniformLocation(program, 'R'), T: gl.getUniformLocation(program, 'T'),
+                    Blur: gl.getUniformLocation(program, 'Blur'), Distort: gl.getUniformLocation(program, 'Distort'), Tint: gl.getUniformLocation(program, 'Tint'),
+                    D: gl.getUniformLocation(program, 'D'), Thick: gl.getUniformLocation(program, 'Thick'), Rot: gl.getUniformLocation(program, 'Rot'), Speed: gl.getUniformLocation(program, 'Speed'),
+                    HyperDistort: gl.getUniformLocation(program, 'HyperDistort'), ProjVerts: gl.getUniformLocation(program, 'ProjVerts'),
+                    Particles: gl.getUniformLocation(program, 'Particles')
+                };
+
+                quadBuffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+                // Simple -1 to 1 quad vertices (size 2 per vertex)
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+                initParticles();
+            }
+
+            function handleResize(force = false) { /* standard */ if (!gl) return false; const dW=gl.canvas.clientWidth; const dH=gl.canvas.clientHeight; if(dW<=0||dH<=0){needsResize=true; return false;} if (force||gl.canvas.width!==dW||gl.canvas.height!==dH) { gl.canvas.width=dW; gl.canvas.height=dH; needsResize=true; console.log(`Resized to ${dW}x${dH}`); return true; } return false; }
+
+            // --- 4D Math Helpers (Unchanged) ---
+            function rotMat4(axis1, axis2, angle) { const c=Math.cos(angle), s=Math.sin(angle); const mat=[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]; mat[axis1][axis1]=c; mat[axis1][axis2]=-s; mat[axis2][axis1]=s; mat[axis2][axis2]=c; return mat; }
+            function multiplyMat4Vec4(m, v) { let r=[0,0,0,0]; for(let i=0;i<4;i++) for(let j=0;j<4;j++) r[i]+=m[i][j]*v[j]; return r; }
+            function multiplyMat4Mat4(a, b) { let r=[[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]]; for(let i=0;i<4;i++) for(let j=0;j<4;j++) for(let k=0;k<4;k++) r[i][j]+=a[i][k]*b[k][j]; return r; }
+            function project4Dto2D(v4, dist = 3.0) { const wP=dist/(dist+v4[3]+1e-6); const x=v4[0]*wP; const y=v4[1]*wP; return [(x*.4+.5),(y*.4+.5)]; }
+
+             // --- Particle Simulation (Unchanged) ---
+             function initParticles() { for(let i=0;i<MAX_PARTICLES;i++){particles.push({pos:[Math.random(),Math.random()],vel:[(Math.random()-.5)*.005,(Math.random()-.5)*.005],life:Math.random()*5});}}
+             function updateParticles(dt) { for(let i=0;i<MAX_PARTICLES;i++){ let p=particles[i]; p.life-=dt; if(p.life<=0){p.pos=[Math.random(),Math.random()];p.vel=[(Math.random()-.5)*.005,(Math.random()-.5)*.005];p.life=2.+Math.random()*3.;} else {p.pos[0]=(p.pos[0]+p.vel[0]+1.)%1.; p.pos[1]=(p.pos[1]+p.vel[1]+1.)%1.; p.vel[0]*=.99; p.vel[1]*=.99;} const lifeFactor=Math.sin(Math.max(0,p.life)/(2.+Math.random()*3.)*Math.PI); particleData[i*3+0]=p.pos[0]; particleData[i*3+1]=p.pos[1]; particleData[i*3+2]=(.5+Math.random()*.5)*lifeFactor; } }
+
+            let lastTime = startTime;
+            function render(timestamp) {
+                animationFrameId = requestAnimationFrame(render);
+                const time = (timestamp - startTime) * 0.001;
+                const deltaTime = Math.min(0.05, (timestamp - lastTime) * 0.001); // Cap delta time
+                lastTime = timestamp;
+
+                if (!gl || gl.isContextLost()) return;
+                if (handleResize() || needsResize) { if(gl.canvas.width<=0||gl.canvas.height<=0)return; gl.viewport(0,0,gl.canvas.width,gl.canvas.height); needsResize=false; }
+
+                // Update
+                updateParticles(deltaTime);
+                let rotMatrix=rotMat4(0,3,time*.2); rotMatrix=multiplyMat4Mat4(rotMat4(1,2,time*.3),rotMatrix); rotMatrix=multiplyMat4Mat4(rotMat4(0,1,time*.15),rotMatrix);
+                for(let i=0; i<16; i++) { const rv=multiplyMat4Vec4(rotMatrix,hypercubeVerts[i]); const p=project4Dto2D(rv,3.+Math.sin(time*.5)*.5); projectedVerts[i*2+0]=p[0]; projectedVerts[i*2+1]=p[1]; }
+
+                // Render
+                gl.clearColor(0.01, 0.0, 0.02, 1.0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                gl.useProgram(program);
+                gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+                if(locations.a_position >= 0) { gl.enableVertexAttribArray(locations.a_position); gl.vertexAttribPointer(locations.a_position, 2, gl.FLOAT, false, 0, 0); } // <<< Use size 2
+                else { console.error("a_position missing"); cancelAnimationFrame(animationFrameId); return; }
+
+                // Animate Uniforms (Use 'time')
+                const blur = 0.6 + Math.sin(time * 0.5) * 0.5;
+                const distort = 0.4 + Math.cos(time * 0.8) * 0.3;
+                const tint = [0.8, 0.85, 1.0, 0.1 + Math.sin(time * 1.1) * 0.08];
+                const hyperDistort = 0.5 + Math.sin(time * 0.4) * 0.4;
+                const D = [ 4+Math.sin(time*.2)*2, 6+Math.cos(time*.25)*3, 8+Math.sin(time*.3)*4, 5+Math.cos(time*.35)*2 ];
+                const Thick = [ .5+.5*Math.sin(time*1.5+.0), .5+.5*Math.cos(time*1.8+.5), .5+.5*Math.sin(time*2.1+1.), .5+.5*Math.cos(time*2.4+1.5) ];
+                const Rot = [ time*.1, time*-.15, time*.2, time*-.25 ];
+                const Speed = [ .5+Math.sin(time*.1)*.3, .4+Math.cos(time*.2)*.3, .6+Math.sin(time*.3)*.2, .7+Math.cos(time*.4)*.1 ];
+
+                // Set Uniforms
+                if(locations.R) gl.uniform2f(locations.R, gl.canvas.width, gl.canvas.height);
+                if(locations.T) gl.uniform1f(locations.T, time);
+                if(locations.Blur) gl.uniform1f(locations.Blur, blur); if(locations.Distort) gl.uniform1f(locations.Distort, distort); if(locations.Tint) gl.uniform4fv(locations.Tint, tint);
+                if(locations.D) gl.uniform1fv(locations.D, D); if(locations.Thick) gl.uniform1fv(locations.Thick, Thick); if(locations.Rot) gl.uniform1fv(locations.Rot, Rot); if(locations.Speed) gl.uniform1fv(locations.Speed, Speed);
+                if(locations.HyperDistort) gl.uniform1f(locations.HyperDistort, hyperDistort); if(locations.ProjVerts) gl.uniform2fv(locations.ProjVerts, projectedVerts);
+                if(locations.Particles) gl.uniform3fv(locations.Particles, particleData);
+
+                gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); // Draw the quad
+
+                infoDiv.textContent = `H-Dist:${hyperDistort.toFixed(2)}|Blur:${blur.toFixed(2)}|Dist:${distort.toFixed(2)}`;
+            }
+
+            // --- Init ---
+             function init() { /* standard init boilerplate */ console.log("Init Hyperlattice..."); try { gl = canvas.getContext('webgl',{antialias:true}) || canvas.getContext('experimental-webgl'); if (!gl) throw new Error('No WebGL'); setupResources(); infoDiv.textContent = "Initialized."; startTime = performance.now(); if(handleResize(true)){ if(gl.canvas.width<=0||gl.canvas.height<=0){ console.warn("Deferring frame"); setTimeout(()=>{if(handleResize(true))animationFrameId=requestAnimationFrame(render);},100); return; }} animationFrameId=requestAnimationFrame(render); window.addEventListener('resize', ()=>{needsResize=true;}); const L=(e)=>{e.preventDefault();if(animationFrameId)cancelAnimationFrame(animationFrameId);animationFrameId=null;console.warn("CTX Lost");}; const R=()=>{console.log("CTX Restored");try{gl=canvas.getContext('webgl',{antialias:true})||canvas.getContext('experimental-webgl');if(!gl)throw new Error('No GL');setupResources();if(animationFrameId===null)animationFrameId=requestAnimationFrame(render);}catch(e){console.error("Restore err:",e);}}; canvas.addEventListener("webglcontextlost",L,false); canvas.addEventListener("webglcontextrestored",R,false); console.log("Init OK."); } catch(e) { console.error("Init failed:", e); if(canvas)canvas.style.display='none'; infoDiv.textContent=`Error: ${e.message}`; } }
+            init();
+        });
+    </script>
+</body>
+</html>
